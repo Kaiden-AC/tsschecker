@@ -35,7 +35,30 @@
 #define FLAG_SAVE_CRYPTEX_NONCE   (1 << 5)
 
 extern int idevicerestore_debug;
-extern unsigned char *base64decode(const char *buf, size_t *size);
+/* libtatsu no longer exports base64decode, so decode through libplist's <data> parser. */
+static unsigned char *base64decode(const char *buf, size_t *size) {
+    const char *alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t length = strlen(buf), padding = 0;
+    if (!length || length % 4) return NULL;
+    while (padding < length && buf[length - padding - 1] == '=') padding++;
+    if (padding > 2 || strspn(buf, alphabet) != length - padding) return NULL;
+    const char *prefix = "<plist version=\"1.0\"><data>";
+    const char *suffix = "</data></plist>";
+    size_t xmlLength = strlen(prefix) + length + strlen(suffix);
+    if (xmlLength > UINT32_MAX) return NULL;
+    char *xml = malloc(xmlLength + 1);
+    if (!xml) return NULL;
+    snprintf(xml, xmlLength + 1, "%s%s%s", prefix, buf, suffix);
+    plist_t data = NULL;
+    plist_from_xml(xml, (uint32_t)xmlLength, &data);
+    free(xml);
+    char *decoded = NULL;
+    uint64_t decodedLength = 0;
+    if (plist_get_node_type(data) == PLIST_DATA) plist_get_data_val(data, &decoded, &decodedLength);
+    plist_free(data);
+    if (decoded) *size = (size_t)decodedLength;
+    return (unsigned char *)decoded;
+}
 #define reterror(code,a ...) {error(a); err = code; goto error;}
 
 static struct option longopts[] = {
@@ -450,6 +473,8 @@ int main(int argc, const char * argv[]) {
 
         devVals.bbsnumSize = 100;
         if(!(devVals.bbsnum = (unsigned char *)base64decode(bbsnum, &devVals.bbsnumSize)) || (devVals.bbsnumSize > bbinfo->bbsnumSize) || !devVals.bbsnumSize || devVals.bbsnumSize == 100) {
+          free(devVals.bbsnum);
+          devVals.bbsnum = NULL;
           if (!(devVals.bbsnum = (uint8_t *)parseNonce(bbsnum, &devVals.bbsnumSize))) {
             reterror(-7, "[TSSC] manually specified BbSNUM=%s, but parsing failed\n", bbsnum);
           }
@@ -464,7 +489,8 @@ int main(int argc, const char * argv[]) {
             reterror(-8, "[TSSC] BbSNUM length for this device should be %d, but you gave one of length %d\n", (int)bbinfo->bbsnumSize,
                      (int)devVals.bbsnumSize);
         }
-    } else {
+    } else if (save_shshblobs && !(flags & (FLAG_LIST_DEVICES | FLAG_LIST_IOS)) &&
+               devVals.deviceModel && getBBDeviceInfo(devVals.deviceModel)->bbsnumSize) {
       if(versVals.basebandMode == kBasebandModeOnlyBaseband || versVals.basebandMode == kBasebandModeWithBaseband) {
         reterror(-7, "[TSSC] No Baseband Serial Number was specified, refusing to save baseband blobs\n\nPlease run ideviceinfo -k \"BasebandSerialNumber\" to get Baseband Serial Number\n");
       }
