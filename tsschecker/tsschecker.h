@@ -106,6 +106,7 @@ typedef struct{
 
 int parseHex(const char *nonce, size_t *parsedLen, char *ret, size_t *retSize);
 
+char *getAppleDBFirmwareJson(const char *device, int isOta);
 char *getFirmwareJson(void);
 char *getBetaFirmwareJson2(const char *type, const char *buildid);
 char *getBetaFirmwareJson(const char *device);
@@ -119,6 +120,7 @@ int printListOfDevices(jssytok_t *tokens);
 int printListOfiOSForDevice(jssytok_t *tokens, char *device, int isOTA);
 
 char *getFirmwareUrl(const char *deviceModel, t_iosVersion *versVals, jssytok_t *tokens, bool beta, bool ota);
+void freeVersionURLs(t_versionURL *urls);
 t_versionURL *getFirmwareUrls(const char *deviceModel, t_iosVersion *versVals, jssytok_t *tokens, bool beta, bool ota);
 char *getBuildManifest(char *url, const char *device, const char *version, const char *buildID, int isOta);
 t_bbdevice getBBDeviceInfo(const char *deviceModel);

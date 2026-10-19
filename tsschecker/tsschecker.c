@@ -13,6 +13,8 @@
 #include <math.h>
 #include <time.h>
 #include <stdio.h>
+#include <ctype.h>
+#include <errno.h>
 
 #ifndef TSSCHECKER_NOMAIN
 #ifndef CMAKE_BUILD
@@ -43,10 +45,8 @@
 #   include <openssl/sha.h>
 #endif // __APPLE__
 
-#define FIRMWARE_JSON_URL "https://api.ipsw.me/v2.1/firmwares.json/condensed"
+#define APPLEDB_FIRMWARE_URL "https://api.appledb.dev/ios/"
 #define FIRMWARE_BETA_JSON_URL "https://api.m1sta.xyz/betas/"
-#define FIRMWARE_BETA_JSON_URL2 "https://api.appledb.dev/ios/"
-#define FIRMWARE_OTA_JSON_URL "https://api.ipsw.me/v2.1/ota.json/condensed"
 
 /* for KTRR devices this value - 32 */
 #define NONCELEN_BASEBAND 20
@@ -58,19 +58,15 @@
 #ifdef WIN32
 #define __mkdir(path, mode) mkdir(path)
 static int win_path_didinit = 0;
-static const char *win_paths[4];
+static const char *win_paths[2];
 
 enum paths{
     kWINPathTSSCHECKER,
-    kWINPathOTA,
-    kWINPathFIRMWARE,
     kWINPathBetaFIRMWARE
 };
 
 static const char *win_pathvars[]={
     "\\tsschecker",
-    "\\ota.json",
-    "\\firmwares.json",
     "\\firmwares_betas.json"
 };
 
@@ -95,8 +91,6 @@ static const char *win_path_get(enum paths path){
 }
 
 #define MANIFEST_SAVE_PATH win_path_get(kWINPathTSSCHECKER)
-#define FIRMWARE_JSON_PATH win_path_get(kWINPathFIRMWARE)
-#define FIRMWARE_OTA_JSON_PATH win_path_get(kWINPathOTA)
 #define FIRMWARE_BETA_JSON_PATH win_path_get(kWINPathBetaFIRMWARE)
 #define DIRECTORY_DELIMITER_STR "\\"
 #define DIRECTORY_DELIMITER_CHR '\\'
@@ -104,8 +98,6 @@ static const char *win_path_get(enum paths path){
 #else
 
 #define MANIFEST_SAVE_PATH "/tmp/tsschecker"
-#define FIRMWARE_JSON_PATH "/tmp/firmwares.json"
-#define FIRMWARE_OTA_JSON_PATH "/tmp/firmwares_ota.json"
 #define FIRMWARE_BETA_JSON_PATH "/tmp/firmwares_betas.json"
 #define DIRECTORY_DELIMITER_STR "/"
 #define DIRECTORY_DELIMITER_CHR '/'
@@ -562,27 +554,214 @@ void sha384(unsigned char *buf, uint8_t bufSz, char* dest, uint8_t destSz) {
 #endif
 }
 
-char *getFirmwareJson(){
-    debug("[TSSC] opening firmwares.json\n");
-    FILE *f = fopen(FIRMWARE_JSON_PATH, "rb");
-    if (!f || nocache){
-        downloadFile(FIRMWARE_JSON_URL, FIRMWARE_JSON_PATH);
-        f = fopen(FIRMWARE_JSON_PATH, "rb");
+/* main.json omits OTA sources, so per-build records are fetched lazily in getFirmwareUrls. */
+static const char *appledbString(plist_t dict, const char *key) {
+    plist_t value = plist_dict_get_item(dict, key);
+    return plist_get_node_type(value) == PLIST_STRING ? plist_get_string_ptr(value, NULL) : NULL;
+}
+
+static int appledbBool(plist_t dict, const char *key) {
+    uint8_t value = 0;
+    plist_t node = plist_dict_get_item(dict, key);
+    if (plist_get_node_type(node) == PLIST_BOOLEAN) plist_get_bool_val(node, &value);
+    return value;
+}
+
+static plist_t readAppleDBJson(const char *path, plist_type type) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return NULL;
+    plist_t data = NULL;
+    if (fseek(file, 0, SEEK_END)) {
+        fclose(file);
+        return NULL;
     }
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *fJson = malloc(fsize + 1);
-    fread(fJson, fsize, 1, f);
-    fclose(f);
-    return fJson;
+    long size = ftell(file);
+    if (size <= 0 || size > UINT32_MAX || fseek(file, 0, SEEK_SET)) {
+        fclose(file);
+        return NULL;
+    }
+    char *json = malloc((size_t)size + 1);
+    if (json && fread(json, 1, size, file) == (size_t)size)
+        plist_from_json(json, (uint32_t)size, &data);
+    free(json);
+    fclose(file);
+    if (plist_get_node_type(data) != type ||
+        (type == PLIST_ARRAY && !plist_array_get_size(data))) {
+        plist_free(data);
+        return NULL;
+    }
+    return data;
+}
+
+static plist_t loadAppleDBJson(const char *resource, plist_type type) {
+    char path[1024], temporary[1040];
+    char cacheKey[512];
+    if (strlen(resource) >= sizeof(cacheKey)) return NULL;
+    strcpy(cacheKey, resource);
+    for (char *c = cacheKey; *c; c++) if (!isalnum((unsigned char)*c)) *c = '_';
+    __mkdir(MANIFEST_SAVE_PATH, 0700);
+    snprintf(path, sizeof(path), "%s%sappledb-%s", MANIFEST_SAVE_PATH, DIRECTORY_DELIMITER_STR, cacheKey);
+    snprintf(temporary, sizeof(temporary), "%s.download", path);
+    plist_t data = NULL;
+    struct stat st;
+    if (!nocache && stat(path, &st) == 0 && time(NULL) - st.st_mtime < 86400)
+        data = readAppleDBJson(path, type);
+    if (!data) {
+        CURL *curl = curl_easy_init();
+        if (!curl) return NULL;
+        char *escaped = curl_easy_escape(curl, resource, 0);
+        if (!escaped) { curl_easy_cleanup(curl); return NULL; }
+        /* Slashes in resource paths are separators, not part of build keys. */
+        char url[2048];
+        snprintf(url, sizeof(url), "%s%s", APPLEDB_FIRMWARE_URL, escaped);
+        curl_free(escaped);
+        curl_easy_cleanup(curl);
+        for (char *slash; (slash = strstr(url, "%2F")); ) {
+            *slash = '/';
+            memmove(slash + 1, slash + 3, strlen(slash + 3) + 1);
+        }
+        info("[AppleDB] downloading %s\n", url);
+        if (downloadFile(url, temporary) || !(data = readAppleDBJson(temporary, type))) {
+            remove(temporary);
+            error("[AppleDB] failed to download or parse %s\n", resource);
+            return NULL;
+        }
+#ifdef WIN32
+        remove(path);
+#endif
+        if (rename(temporary, path)) {
+            warning("[AppleDB] could not cache metadata at %s\n", path);
+            remove(temporary);
+        }
+    }
+    return data;
+}
+
+static const char *appledbOSForDevice(const char *device) {
+    if (!device) return "";
+    if (!strncasecmp(device, "Watch", 5)) return "watchOS/";
+    if (!strncasecmp(device, "iPhone", 6) || !strncasecmp(device, "iPad", 4) ||
+        !strncasecmp(device, "iPod", 4)) return "iOS/";
+    if (!strncasecmp(device, "AppleTV", 7)) return "tvOS/";
+    if (!strncasecmp(device, "AudioAccessory", 14)) return "HomePod Software/";
+    if (!strncasecmp(device, "iBridge", 7)) return "bridgeOS/";
+    if (!strncasecmp(device, "RealityDevice", 13)) return "visionOS/";
+    if (!strncasecmp(device, "Mac", 3) || !strncasecmp(device, "iMac", 4) ||
+        !strncasecmp(device, "VirtualMac", 10)) return "macOS/";
+    return "";
+}
+
+static void appledbAddFirmware(plist_t devices, const char *model, plist_t build, const char *url) {
+    const char *version = appledbString(build, "version");
+    const char *buildID = appledbString(build, "build");
+    if (!version || !buildID || !isdigit((unsigned char)*version)) return;
+    size_t numericLength = strspn(version, "0123456789.");
+    char *numericVersion = malloc(numericLength + 1);
+    if (!numericVersion) return;
+    memcpy(numericVersion, version, numericLength);
+    numericVersion[numericLength] = '\0';
+    plist_t entry = plist_dict_get_item(devices, model);
+    if (!entry) {
+        entry = plist_new_dict();
+        plist_dict_set_item(entry, "firmwares", plist_new_array());
+        plist_dict_set_item(devices, model, entry);
+    }
+    plist_t firmware = plist_new_dict();
+    plist_dict_set_item(firmware, "version", plist_new_string(numericVersion));
+    plist_dict_set_item(firmware, "buildid", plist_new_string(buildID));
+    if (url) plist_dict_set_item(firmware, "url", plist_new_string(url));
+    else {
+        const char *key = appledbString(build, "key");
+        if (key) plist_dict_set_item(firmware, "appledbkey", plist_new_string(key));
+    }
+    plist_dict_set_item(firmware, "releasetype", plist_new_string(
+        appledbBool(build, "beta") || appledbBool(build, "rc") ? "Beta" : "Public"));
+    plist_array_append_item(plist_dict_get_item(entry, "firmwares"), firmware);
+    free(numericVersion);
+}
+
+static char *appledbFirmwareJson(plist_t catalog, const char *device, int isOta, int summary) {
+    plist_t devices = plist_new_dict();
+    for (uint32_t i = 0; i < plist_array_get_size(catalog); i++) {
+        plist_t build = plist_array_get_item(catalog, i);
+        if (summary) {
+            if (!appledbString(build, "key")) continue;
+            plist_t models = plist_dict_get_item(build, "deviceMap");
+            for (uint32_t j = 0; j < plist_array_get_size(models); j++) {
+                plist_t node = plist_array_get_item(models, j);
+                const char *model = plist_get_node_type(node) == PLIST_STRING ? plist_get_string_ptr(node, NULL) : NULL;
+                if (model && (!device || !strcasecmp(device, model)))
+                    appledbAddFirmware(devices, model, build, NULL);
+            }
+            continue;
+        }
+        plist_t sources = plist_dict_get_item(build, "sources");
+        for (uint32_t j = 0; j < plist_array_get_size(sources); j++) {
+            plist_t source = plist_array_get_item(sources, j);
+            const char *type = appledbString(source, "type");
+            if (!type || strcmp(type, isOta ? "ota" : "ipsw")) continue;
+            plist_t links = plist_dict_get_item(source, "links");
+            const char *url = NULL;
+            for (uint32_t k = 0; k < plist_array_get_size(links); k++) {
+                plist_t link = plist_array_get_item(links, k);
+                const char *candidate = appledbString(link, "url");
+                if (!candidate || (plist_dict_get_item(link, "active") && !appledbBool(link, "active"))) continue;
+                if (!url || appledbBool(link, "preferred")) url = candidate;
+                if (appledbBool(link, "preferred")) break;
+            }
+            if (!url) continue;
+            plist_t models = plist_dict_get_item(source, "deviceMap");
+            for (uint32_t k = 0; k < plist_array_get_size(models); k++) {
+                plist_t node = plist_array_get_item(models, k);
+                const char *model = plist_get_node_type(node) == PLIST_STRING ? plist_get_string_ptr(node, NULL) : NULL;
+                if (model && (!device || !strcasecmp(device, model)))
+                    appledbAddFirmware(devices, model, build, url);
+            }
+        }
+    }
+    plist_t root = devices;
+    if (!isOta) {
+        root = plist_new_dict();
+        plist_dict_set_item(root, "devices", devices);
+    }
+    char *json = NULL;
+    uint32_t length = 0;
+    plist_to_json(root, &json, &length, 0);
+    plist_free(root);
+    return json;
+}
+
+char *getAppleDBFirmwareJson(const char *device, int isOta) {
+    char resource[256];
+    snprintf(resource, sizeof(resource), "%smain.json", appledbOSForDevice(device));
+    plist_t catalog = loadAppleDBJson(resource, PLIST_ARRAY);
+    if (!catalog) return NULL;
+    char *json = appledbFirmwareJson(catalog, device, isOta, 1);
+    plist_free(catalog);
+    return json;
+}
+
+static char *getAppleDBBuildJson(const char *key, const char *device, int isOta) {
+    char resource[512];
+    if (snprintf(resource, sizeof(resource), "%s.json", key) >= sizeof(resource)) return NULL;
+    plist_t build = loadAppleDBJson(resource, PLIST_DICT);
+    if (!build) return NULL;
+    plist_t catalog = plist_new_array();
+    plist_array_append_item(catalog, build);
+    char *json = appledbFirmwareJson(catalog, device, isOta, 0);
+    plist_free(catalog);
+    return json;
+}
+
+char *getFirmwareJson(void) {
+    return getAppleDBFirmwareJson(NULL, 0);
 }
 
 char *getBetaFirmwareJson2(const char *type, const char *buildid) {
     char url[256], path[256];
     memset(url, 0, 256);
     memset(path, 0, 256);
-    strcat(url, FIRMWARE_BETA_JSON_URL2);
+    strcat(url, APPLEDB_FIRMWARE_URL);
     strcat(url, type);
     strcat(url, ";");
     strcat(url, buildid);
@@ -629,20 +808,8 @@ char *getBetaFirmwareJson(const char *device) {
     }
 }
 
-char *getOtaJson(){
-    debug("[TSSC] opening ota.json\n");
-    FILE *f = fopen(FIRMWARE_OTA_JSON_PATH, "rb");
-    if (!f || nocache){
-        downloadFile(FIRMWARE_OTA_JSON_URL, FIRMWARE_OTA_JSON_PATH);
-        f = fopen(FIRMWARE_OTA_JSON_PATH, "rb");
-    }
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *fJson = malloc(fsize + 1);
-    fread(fJson, fsize, 1, f);
-    fclose(f);
-    return fJson;
+char *getOtaJson(void) {
+    return getAppleDBFirmwareJson(NULL, 1);
 }
 
 #pragma mark more get functions
@@ -766,7 +933,7 @@ long parseTokens(const char *json, jssytok_t **tokens){
 
 #pragma mark get functions
 //returns NULL terminated array of t_versionURL objects
-t_versionURL *getFirmwareUrls(const char *deviceModel, t_iosVersion *versVals, jssytok_t *tokens, bool beta, bool ota){
+static t_versionURL *getResolvedFirmwareUrls(const char *deviceModel, t_iosVersion *versVals, jssytok_t *tokens, bool beta, bool ota){
     t_versionURL *rets = NULL;
     const t_versionURL *rets_base = NULL;
     unsigned retcounter = 0;
@@ -789,24 +956,10 @@ malloc_rets:
 
         if (ios->size == strlen(versstring) && strncmp(versstring, ios->value, ios->size) == 0) {
 
-            if (ota) {
-                jssytok_t *releaseType = NULL;
-                if (versVals->useBeta && !(releaseType = jssy_dictGetValueForKey(tmp, "releasetype"))) {
-                    continue;
-                }
-                else if (!versVals->useBeta) {
-//                    if (jssy_dictGetValueForKey(tmp, "prerequisitebuildid")) {
-//                        continue;
-//                    }
-                }
-                else if (strncmp(releaseType->value, "Beta", releaseType->size) != 0 && !beta) {
-                    continue;
-                }
-//                else if (jssy_dictGetValueForKey(tmp, "prerequisitebuildid")) {
-//                    continue;
-//                }
-            }
-            
+            jssytok_t *releaseType = jssy_dictGetValueForKey(tmp, "releasetype");
+            int isBeta = releaseType && releaseType->size == 4 && !strncmp(releaseType->value, "Beta", 4);
+            if (!versVals->buildID && isBeta != !!versVals->useBeta) continue;
+
             jssytok_t *url = jssy_dictGetValueForKey(tmp, "url");
             jssytok_t *i_vers = jssy_dictGetValueForKey(tmp, "version");
             jssytok_t *i_build = jssy_dictGetValueForKey(tmp, "buildid");
@@ -848,6 +1001,71 @@ malloc_rets:
     else if (!rets) goto malloc_rets;
     
     return (t_versionURL*)rets_base;
+}
+
+void freeVersionURLs(t_versionURL *urls) {
+    if (!urls) return;
+    for (t_versionURL *u = urls; u->url; u++) {
+        free(u->url);
+        free(u->version);
+        free(u->buildID);
+    }
+    free(urls);
+}
+
+t_versionURL *getFirmwareUrls(const char *deviceModel, t_iosVersion *versVals, jssytok_t *tokens, bool beta, bool ota) {
+    jssytok_t *firmwares = getFirmwaresForDevice(deviceModel, tokens, ota);
+    if (!firmwares) { errno = ENOENT; return NULL; }
+    t_versionURL *result = NULL;
+    size_t resultCount = 0;
+    const char *selection = versVals->buildID ? versVals->buildID : versVals->version;
+    if (!selection) { errno = EINVAL; return NULL; }
+    jssytok_t *item = firmwares->subval;
+    for (size_t i = 0; i < firmwares->size; i++, item = item->next) {
+        jssytok_t *value = jssy_dictGetValueForKey(item, versVals->buildID ? "buildid" : "version");
+        if (!value || value->size != strlen(selection) || strncmp(value->value, selection, value->size)) continue;
+        jssytok_t *release = jssy_dictGetValueForKey(item, "releasetype");
+        int isBeta = release && release->size == 4 && !strncmp(release->value, "Beta", 4);
+        if (!versVals->buildID && isBeta != !!versVals->useBeta) continue;
+        jssytok_t *key = jssy_dictGetValueForKey(item, "appledbkey");
+        if (!key) {
+            /* Compatibility for callers providing already-resolved firmware lists. */
+            result = getResolvedFirmwareUrls(deviceModel, versVals, tokens, beta, ota);
+            if (!result) errno = ENOENT;
+            return result;
+        }
+        char *keyString = malloc(key->size + 1);
+        if (!keyString) goto error;
+        memcpy(keyString, key->value, key->size);
+        keyString[key->size] = '\0';
+        char *json = getAppleDBBuildJson(keyString, deviceModel, ota);
+        free(keyString);
+        if (!json) goto error;
+        jssytok_t *buildTokens = NULL;
+        t_versionURL *urls = NULL;
+        if (parseTokens(json, &buildTokens) > 0)
+            urls = getResolvedFirmwareUrls(deviceModel, versVals, buildTokens, beta, ota);
+        free(buildTokens);
+        free(json);
+        if (!urls) continue;
+        size_t count = 0;
+        while (urls[count].url) count++;
+        t_versionURL *grown = realloc(result, (resultCount + count + 1) * sizeof(*result));
+        if (!grown) {
+            freeVersionURLs(urls);
+            goto error;
+        }
+        result = grown;
+        memcpy(result + resultCount, urls, (count + 1) * sizeof(*result));
+        resultCount += count;
+        free(urls);
+    }
+    if (!result) errno = ENOENT;
+    return result;
+error:
+    freeVersionURLs(result);
+    errno = EIO;
+    return NULL;
 }
 
 //#ifdef WIN32
@@ -1916,7 +2134,7 @@ int cmpfunc(const void * a, const void * b){
             if(aa == NULL && bb == NULL) {
                 aa = strchr(*(char**)a, '[');
                 bb = strchr(*(char**)b, '[');
-                return aa == NULL ? (bb == NULL ? 0 : -1) : 1;
+                return aa == NULL ? (bb == NULL ? 0 : -1) : (bb == NULL ? 1 : 0);
             }
             return aa == NULL ? 1 : -1;
         }
@@ -1926,7 +2144,8 @@ int cmpfunc(const void * a, const void * b){
 }
 
 char **getListOfiOSForDevice(jssytok_t *tokens, const char *device, int isOTA, int *versionCntt, bool beta){
-    //requires free(versions[versionsCnt-1]); and free(versions); after use
+    // Callers own every string in the returned array.
+    if (versionCntt) *versionCntt = 0;
     jssytok_t *firmwares = getFirmwaresForDevice(device, tokens, isOTA);
 
     if (!firmwares) {
@@ -1944,7 +2163,7 @@ char **getListOfiOSForDevice(jssytok_t *tokens, const char *device, int isOTA, i
         int isBeta = 0;
         jssytok_t *releaseType = NULL;
         if ((releaseType = jssy_dictGetValueForKey(tmp, "releasetype"))) {
-            isBeta = (strncmp(releaseType->value, "Beta", releaseType->size) == 0 && beta);
+            isBeta = (releaseType->size == 4 && strncmp(releaseType->value, "Beta", 4) == 0);
         }
         
         versions[--versionsCnt] = (char*)malloc((ios->size+1 + isBeta * strlen("[B]")) * sizeof(char));
@@ -1959,7 +2178,8 @@ char **getListOfiOSForDevice(jssytok_t *tokens, const char *device, int isOTA, i
 }
 
 char **getListOfiOSForDevice2(jssytok_t *tokens, const char *device, int isOTA, int *versionCntt, int buildid, bool beta){
-    //requires free(versions[versionsCnt-1]); and free(versions); after use
+    // Callers own every string in the returned array.
+    if (versionCntt) *versionCntt = 0;
     jssytok_t *firmwares = getFirmwaresForDevice(device, tokens, isOTA);
 
     if (!firmwares) {
@@ -1978,7 +2198,7 @@ char **getListOfiOSForDevice2(jssytok_t *tokens, const char *device, int isOTA, 
         int isBeta = 0;
         jssytok_t *releaseType = NULL;
         if ((releaseType = jssy_dictGetValueForKey(tmp, "releasetype"))) {
-            isBeta = (strncmp(releaseType->value, "Beta", releaseType->size) == 0 && beta);
+            isBeta = (releaseType->size == 4 && strncmp(releaseType->value, "Beta", 4) == 0);
         }
 
         versions[--versionsCnt] = (char*)malloc((ios->size+1 + isBeta * strlen("[B]")) * sizeof(char));
@@ -2037,9 +2257,10 @@ char *getBetaURLForDevice(jssytok_t *tokens, const char *buildid) {
 int printListOfiOSForDevice(jssytok_t *tokens, char *device, int isOTA){
 #define MAX_PER_LINE 10
     
-    int versionsCnt;
+    int versionsCnt = 0;
     char **versions = getListOfiOSForDevice(tokens, device, isOTA, &versionsCnt, 0);
     
+    if (!versions || !versionsCnt) return -1;
     int rspn = 0,
         currVer = 0,
         nextVer = 0;

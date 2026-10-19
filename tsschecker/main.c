@@ -498,7 +498,7 @@ int main(int argc, const char * argv[]) {
     
     if (!buildmanifest) { //no need to get firmwares/ota json if specifying buildmanifest manually
     reparse:
-        firmwareJson = (versVals.isOta) ? getOtaJson() : getFirmwareJson();
+        firmwareJson = getAppleDBFirmwareJson(devVals.deviceModel, versVals.isOta);
         if (!devVals.installType) //only set this if installType wasn't set manually
             devVals.isUpdateInstall = (versVals.isOta); //there are no erase installs over OTA
         if (!firmwareJson) reterror(-6,"[TSSC] could not get firmwares.json\n");
@@ -520,24 +520,41 @@ int main(int argc, const char * argv[]) {
             
         char **versions = getListOfiOSForDevice(firmwareTokens, devVals.deviceModel, versVals.isOta, &versionCnt, versVals.useBeta);
         if (!versionCnt) reterror(-8, "[TSSC] failed finding latest firmware version. If you using --boardconfig, please also specify device model with -d ota=%d\n",versVals.isOta);
-        char *bpos = NULL;
-        while((bpos = strstr(versVals.version = strdup(versions[i++]),"[B]")) != 0){
-            if (versVals.useBeta) break;
-            free((char*)versVals.version);
-            if (--versionCnt == 0) reterror(-9, "[TSSC] automatic firmware selection couldn't find non-beta firmware\n");
+        int lookupFailed = 0;
+        for (i = 0; i < versionCnt; i++) {
+            if (i && !strcmp(versions[i], versions[i - 1])) continue;
+            char *bpos = strstr(versions[i], "[B]");
+            if (!!bpos != !!versVals.useBeta) continue;
+            versVals.version = strdup(versions[i]);
+            if (bpos && versVals.version) versVals.version[bpos - versions[i]] = '\0';
+            if (!versVals.version) break;
+            /* A build can list this model without shipping the requested IPSW/OTA. */
+            t_versionURL *urls = getFirmwareUrls(devVals.deviceModel, &versVals, firmwareTokens, false, versVals.isOta);
+            if (urls) {
+                freeVersionURLs(urls);
+                break;
+            }
+            if (errno != ENOENT) { lookupFailed = 1; break; }
+            free((char *)versVals.version);
+            versVals.version = NULL;
         }
+        for (i = 0; i < versionCnt; i++) free(versions[i]);
+        free(versions);
+        if (lookupFailed) reterror(-6, "[TSSC] AppleDB firmware source lookup failed\n");
+        if (!versVals.version) reterror(-9, "[TSSC] automatic firmware selection couldn't find a matching %s firmware\n", versVals.useBeta ? "beta" : "public");
         debug("[TSSC] selecting latest version of firmware: %s\n",versVals.version);
-        if (bpos) *bpos= '\0';
-        if (versions) free(versions[versionCnt-1]),free(versions);
     }
     
     if (flags & FLAG_LIST_DEVICES) {
         printListOfDevices(firmwareTokens);
+        isSigned = 1;
     }else if (flags & FLAG_LIST_IOS){
         if (!devVals.deviceModel)
             reterror(-3,"[TSSC] please specify a device for this option\n\tuse -h for more help\n");
 
-        printListOfiOSForDevice(firmwareTokens, devVals.deviceModel, versVals.isOta);
+        if (printListOfiOSForDevice(firmwareTokens, devVals.deviceModel, versVals.isOta))
+            reterror(-3, "[TSSC] no firmware versions found for %s\n", devVals.deviceModel);
+        isSigned = 1;
     }else{
         //request ticket
         if (buildmanifest) {
