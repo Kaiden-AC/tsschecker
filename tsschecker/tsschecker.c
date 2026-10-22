@@ -696,28 +696,36 @@ static char *appledbFirmwareJson(plist_t catalog, const char *device, int isOta,
             continue;
         }
         plist_t sources = plist_dict_get_item(build, "sources");
-        for (uint32_t j = 0; j < plist_array_get_size(sources); j++) {
-            plist_t source = plist_array_get_item(sources, j);
-            const char *type = appledbString(source, "type");
-            if (!type || strcmp(type, isOta ? "ota" : "ipsw")) continue;
-            plist_t links = plist_dict_get_item(source, "links");
-            const char *url = NULL;
-            for (uint32_t k = 0; k < plist_array_get_size(links); k++) {
-                plist_t link = plist_array_get_item(links, k);
-                const char *candidate = appledbString(link, "url");
-                if (!candidate || (plist_dict_get_item(link, "active") && !appledbBool(link, "active"))) continue;
-                if (!url || appledbBool(link, "preferred")) url = candidate;
-                if (appledbBool(link, "preferred")) break;
-            }
-            if (!url) continue;
-            plist_t models = plist_dict_get_item(source, "deviceMap");
-            for (uint32_t k = 0; k < plist_array_get_size(models); k++) {
-                plist_t node = plist_array_get_item(models, k);
-                const char *model = plist_get_node_type(node) == PLIST_STRING ? plist_get_string_ptr(node, NULL) : NULL;
-                if (model && (!device || !strcasecmp(device, model)))
+        // Delta OTAs share the full OTA's build; only use them for models without a full one
+        plist_t covered = plist_new_dict();
+        for (int isDelta = 0; isDelta < 2; isDelta++) {
+            for (uint32_t j = 0; j < plist_array_get_size(sources); j++) {
+                plist_t source = plist_array_get_item(sources, j);
+                const char *type = appledbString(source, "type");
+                if (!type || strcmp(type, isOta ? "ota" : "ipsw")) continue;
+                if (!!plist_dict_get_item(source, "prerequisiteBuild") != isDelta) continue;
+                plist_t links = plist_dict_get_item(source, "links");
+                const char *url = NULL;
+                for (uint32_t k = 0; k < plist_array_get_size(links); k++) {
+                    plist_t link = plist_array_get_item(links, k);
+                    const char *candidate = appledbString(link, "url");
+                    if (!candidate || (plist_dict_get_item(link, "active") && !appledbBool(link, "active"))) continue;
+                    if (!url || appledbBool(link, "preferred")) url = candidate;
+                    if (appledbBool(link, "preferred")) break;
+                }
+                if (!url) continue;
+                plist_t models = plist_dict_get_item(source, "deviceMap");
+                for (uint32_t k = 0; k < plist_array_get_size(models); k++) {
+                    plist_t node = plist_array_get_item(models, k);
+                    const char *model = plist_get_node_type(node) == PLIST_STRING ? plist_get_string_ptr(node, NULL) : NULL;
+                    if (!model || (device && strcasecmp(device, model))) continue;
+                    if (isDelta && plist_dict_get_item(covered, model)) continue;
                     appledbAddFirmware(devices, model, build, url);
+                    plist_dict_set_item(covered, model, plist_new_bool(1));
+                }
             }
         }
+        plist_free(covered);
     }
     plist_t root = devices;
     if (!isOta) {
@@ -1773,7 +1781,8 @@ int isManifestBufSignedForDevice(char *buildManifestBuffer, t_devicevals *devVal
             t_installType installType = devVals->installType;
             devVals->parsedApnonceLen = 0;
             devVals->apnonce = (char *)0x1337;
-            devVals->installType = kInstallTypeErase;
+            // Update here means the manifest has no Erase identity (e.g. OTAs)
+            if (installType != kInstallTypeUpdate) devVals->installType = kInstallTypeErase;
             bool save_apticket3 = true;
             /*
              * Apple Tatsu moment
@@ -2024,25 +2033,20 @@ int isVersionSignedForDevice(jssytok_t *firmwareTokens, t_iosVersion *versVals, 
 
     int cursigned = 0;
     for (t_versionURL *u = urls; u->url; u++) {
-        buildManifest = getBuildManifest(u->url, devVals->deviceModel, versVals->version, u->buildID, versVals->isOta);
-        if (!buildManifest) {
-            error("[TSSC] ERROR: could not get BuildManifest for firmwareurl %s\n",u->url);
-            continue;
-        }
-
         if (cursigned && !u->isDupulicate) cursigned = 0;
-        
-        nocache = 1;
-        
+
         if (cursigned) {
-            info("[TSSC] skipping duplicated build\n");
-            
-        }else if ((isSignedOne = isManifestBufSignedForDevice(buildManifest, devVals, versVals->basebandMode, server_url_string)) >= 0){
-            cursigned |= (isSigned > 0);
-            
-            isSigned = (isSignedOne > 0 || isSigned > 0);
-            if (buildManifest) (void)(free(buildManifest)), buildManifest = NULL;
-            info("Firmware version %s %s %s signed!\n",u->version,u->buildID,isSignedOne ? "IS" : "IS NOT");
+            info("[TSSC] skipping duplicated build %s\n", u->buildID);
+        }else if (!(buildManifest = getBuildManifest(u->url, devVals->deviceModel, versVals->version, u->buildID, versVals->isOta))) {
+            error("[TSSC] ERROR: could not get BuildManifest for firmwareurl %s\n",u->url);
+        }else{
+            nocache = 1;
+            if ((isSignedOne = isManifestBufSignedForDevice(buildManifest, devVals, versVals->basebandMode, server_url_string)) >= 0){
+                cursigned |= (isSignedOne > 0);
+                isSigned = (isSignedOne > 0 || isSigned > 0);
+                info("Firmware version %s %s %s signed!\n",u->version,u->buildID,isSignedOne ? "IS" : "IS NOT");
+            }
+            (void)(free(buildManifest)), buildManifest = NULL;
         }
         (void)(free(u->url)),u->url = NULL;
         (void)(free(u->buildID)),u->buildID = NULL;
