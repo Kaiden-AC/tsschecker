@@ -1051,7 +1051,7 @@ t_versionURL *getFirmwareUrls(const char *deviceModel, t_iosVersion *versVals, j
         if (!json) goto error;
         jssytok_t *buildTokens = NULL;
         t_versionURL *urls = NULL;
-        if (parseTokens(json, &buildTokens) > 0)
+        if (parseTokens(json, &buildTokens) > 0 && getFirmwaresForDevice(deviceModel, buildTokens, ota))
             urls = getResolvedFirmwareUrls(deviceModel, versVals, buildTokens, beta, ota);
         free(buildTokens);
         free(json);
