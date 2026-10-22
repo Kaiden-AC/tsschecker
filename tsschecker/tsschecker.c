@@ -2006,7 +2006,11 @@ error:
 int isVersionSignedForDevice(jssytok_t *firmwareTokens, t_iosVersion *versVals, t_devicevals *devVals, const char* server_url_string){
 #define reterror(a ... ) {error(a); goto error;}
     int nocacheorig = nocache;
-    if (versVals->version && atoi(versVals->version) <= 3) {
+    const char *model = devVals->deviceModel;
+    // watchOS, bridgeOS, audioOS, visionOS and macOS version numbers don't track iOS
+    int usesiOSVersioning = model && (!strncasecmp(model, "iPhone", 6) || !strncasecmp(model, "iPod", 4)
+                                      || !strncasecmp(model, "iPad", 4) || !strncasecmp(model, "AppleTV", 7));
+    if (usesiOSVersioning && versVals->version && atoi(versVals->version) <= 3) {
         info("[TSSC] version to check \"%s\" seems to be iOS 3 or lower, which did not require SHSH or APTicket.\n\tSkipping checks and returning true.\n",versVals->version);
         return 1;
     }
