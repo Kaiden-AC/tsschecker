@@ -12,6 +12,10 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
+#ifndef CMAKE_BUILD
+#include "../config.h"
+#endif
+
 #include <stdio.h>
 #include <getopt.h>
 #include <string.h>
@@ -35,6 +39,27 @@
 #define FLAG_SAVE_CRYPTEX_NONCE   (1 << 5)
 
 extern int idevicerestore_debug;
+
+/* futurerestore/libtatsu >= 1.0.5 adds tss_set_print_tss_request/response();
+ * older (libimobiledevice) libtatsu does not. The build systems define
+ * HAVE_TSS_SET_PRINT_TSS_REQUEST / HAVE_TSS_SET_PRINT_TSS_RESPONSE when the
+ * symbols are found; fall back to the internal print_tss_* flags so we
+ * build against both. */
+static void tsschecker_set_print_tss_request(int enable) {
+#ifdef HAVE_TSS_SET_PRINT_TSS_REQUEST
+    tss_set_print_tss_request(enable);
+#else
+    print_tss_request = enable ? 1 : 0;
+#endif
+}
+static void tsschecker_set_print_tss_response(int enable) {
+#ifdef HAVE_TSS_SET_PRINT_TSS_RESPONSE
+    tss_set_print_tss_response(enable);
+#else
+    print_tss_response = enable ? 1 : 0;
+#endif
+}
+
 /* libtatsu no longer exports base64decode, so decode through libplist's <data> parser. */
 static unsigned char *base64decode(const char *buf, size_t *size) {
     const char *alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -311,8 +336,8 @@ int main(int argc, const char * argv[]) {
                 break;
             case '0': // long option: "debug"; can be called as short option
                 idevicerestore_debug = 1;
-                tss_set_print_tss_request(1);
-                tss_set_print_tss_response(1);
+                tsschecker_set_print_tss_request(1);
+                tsschecker_set_print_tss_response(1);
                 tss_set_debug_level(3);
                 break;
             case '1': // long option: "list-devices"; can be called as short option
@@ -325,10 +350,10 @@ int main(int argc, const char * argv[]) {
                 shshSavePath = optarg;
                 break;
             case '4': // long option: "print-tss-request"; can be called as short option
-                tss_set_print_tss_request(1);
+                tsschecker_set_print_tss_request(1);
                 break;
             case '5': // long option: "print-tss-response"; can be called as short option
-                tss_set_print_tss_response(1);
+                tsschecker_set_print_tss_response(1);
                 break;
             case '6': // long option: "beta"; can be called as short option
                 versVals.useBeta = 1;
@@ -349,8 +374,8 @@ int main(int argc, const char * argv[]) {
             case 'r': // long option: "raw"; can be called as short option
                 rawFilePath = optarg;
                 idevicerestore_debug = 1;
-                tss_set_print_tss_request(1);
-                tss_set_print_tss_response(1);
+                tsschecker_set_print_tss_request(1);
+                tsschecker_set_print_tss_response(1);
                 tss_set_debug_level(3);
                 break;
             case 'c': // long option: "bbsnum"; can be called as short option

@@ -156,6 +156,26 @@ if(NOT NO_PKGCFG)
 			libplist-2.0>=2.3.0
 			libtatsu-1.0
 			libirecovery-1.0)
+
+	# futurerestore/libtatsu >= 1.0.5 adds tss_set_print_tss_request/response();
+	# older libtatsu builds do not. Detect from the installed header (which
+	# is paired with the linked library) and define HAVE_* for main.c's
+	# fallback to internal print_tss_* flags.
+	find_file(TSSCHECKER_TSS_H NAMES tss.h PATHS "${DEPS_INCLUDE_DIRS}" PATH_SUFFIXES libtatsu NO_DEFAULT_PATH)
+	if(NOT TSSCHECKER_TSS_H)
+		find_file(TSSCHECKER_TSS_H NAMES tss.h PATHS "${DEPS_INCLUDE_DIRS}" PATH_SUFFIXES libtatsu)
+	endif()
+	if(TSSCHECKER_TSS_H)
+		file(READ "${TSSCHECKER_TSS_H}" _tsschecker_tss_h_content)
+		if(_tsschecker_tss_h_content MATCHES "tss_set_print_tss_request")
+			set(HAVE_TSS_SET_PRINT_TSS_REQUEST 1)
+		endif()
+		if(_tsschecker_tss_h_content MATCHES "tss_set_print_tss_response")
+			set(HAVE_TSS_SET_PRINT_TSS_RESPONSE 1)
+		endif()
+		message(STATUS "libtatsu: tss.h=${TSSCHECKER_TSS_H} HAVE_TSS_SET_PRINT_TSS_REQUEST=${HAVE_TSS_SET_PRINT_TSS_REQUEST} HAVE_TSS_SET_PRINT_TSS_RESPONSE=${HAVE_TSS_SET_PRINT_TSS_RESPONSE}")
+	endif()
+
 	target_include_directories(tsschecker PRIVATE "${DEPS_INCLUDE_DIRS}")
 	target_link_libraries(tsschecker PRIVATE
 			${DEPS_LINK_LIBRARIES}
@@ -168,6 +188,16 @@ if(NOT NO_PKGCFG)
 		target_link_libraries(tsschecker PRIVATE OpenSSL::Crypto)
 	endif()
 else()
+	# NO_PKGCFG: detect tss_set_print_* in dep_root header (paired lib).
+	if(EXISTS "${CMAKE_SOURCE_DIR}/dep_root/include/libtatsu/tss.h")
+		file(READ "${CMAKE_SOURCE_DIR}/dep_root/include/libtatsu/tss.h" _tsschecker_tss_h_content)
+		if(_tsschecker_tss_h_content MATCHES "tss_set_print_tss_request")
+			set(HAVE_TSS_SET_PRINT_TSS_REQUEST 1)
+		endif()
+		if(_tsschecker_tss_h_content MATCHES "tss_set_print_tss_response")
+			set(HAVE_TSS_SET_PRINT_TSS_RESPONSE 1)
+		endif()
+	endif()
 	target_link_directories(tsschecker PRIVATE
 			"${CMAKE_SOURCE_DIR}/dep_root/lib/")
 	target_link_libraries(tsschecker PRIVATE
@@ -191,6 +221,13 @@ else()
 				"-framework CoreFoundation"
 				"-framework IOKit")
 	endif()
+endif()
+
+if(HAVE_TSS_SET_PRINT_TSS_REQUEST)
+	add_definitions(-DHAVE_TSS_SET_PRINT_TSS_REQUEST=1)
+endif()
+if(HAVE_TSS_SET_PRINT_TSS_RESPONSE)
+	add_definitions(-DHAVE_TSS_SET_PRINT_TSS_RESPONSE=1)
 endif()
 
 add_definitions(

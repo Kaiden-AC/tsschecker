@@ -74,13 +74,27 @@ AC_ARG_WITH(
 PKG_CHECK_MODULES(libplist, libplist-2.0 >= 2.3.0)
 PKG_CHECK_MODULES(libtatsu, libtatsu-1.0 >= 1.0.4)
 PKG_CHECK_MODULES(libcurl, libcurl >= 1.0)
+PKG_CHECK_MODULES(zlib, zlib >= 1.0)
+
+# futurerestore/libtatsu >= 1.0.5 adds tss_set_print_tss_request/response();
+# older libtatsu builds do not export them. Detect so tsschecker builds
+# against both (falls back to internal print_tss_* flags, see main.c).
+save_LIBS="$LIBS"
+save_CFLAGS="$CFLAGS"
+LIBS="$libtatsu_LIBS $libplist_LIBS $libcurl_LIBS $zlib_LIBS $LIBS"
+CFLAGS="$libtatsu_CFLAGS $libplist_CFLAGS $libcurl_CFLAGS $zlib_CFLAGS $CFLAGS"
+AC_CHECK_FUNCS([tss_set_print_tss_request],
+  [AC_DEFINE([HAVE_TSS_SET_PRINT_TSS_REQUEST], [1], [Define if libtatsu provides tss_set_print_tss_request])])
+AC_CHECK_FUNCS([tss_set_print_tss_response],
+  [AC_DEFINE([HAVE_TSS_SET_PRINT_TSS_RESPONSE], [1], [Define if libtatsu provides tss_set_print_tss_response])])
+LIBS="$save_LIBS"
+CFLAGS="$save_CFLAGS"
 # libgeneral + libfragmentzip are vendored as git submodules under external/
 # (https://github.com/tihmstar/libgeneral,
 #  https://github.com/tihmstar/libfragmentzip)
 # and built statically as libgeneral.a / libfragmentzip.a, so no system
-# pkg-config install is required for them. zlib is still needed by
-# libfragmentzip.
-PKG_CHECK_MODULES(zlib, zlib >= 1.0)
+# pkg-config install is required for them. zlib (checked above) is still
+# needed by libfragmentzip.
 
 AS_IF([test "x$with_wolfssl" = xyes], [
         PKG_CHECK_MODULES(wolfssl, wolfssl >= 1.0)
