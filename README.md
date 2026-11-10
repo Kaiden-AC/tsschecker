@@ -74,10 +74,6 @@ Install or Compile dependencies
   * make
   * pkg-config
 
-* Tihmstar's libs:
-  * [libgeneral](https://github.com/tihmstar/libgeneral)
-  * [libfragmentzip](https://github.com/tihmstar/libfragmentzip)
-
 * External libs:
   * [libcurl](https://curl.haxx.se/libcurl/)
   * [libirecovery](https://github.com/libimobiledevice/libirecovery)
@@ -86,11 +82,19 @@ Install or Compile dependencies
   * [openssl](https://www.openssl.org/) (or you can use CommonCrypto on macOS/OS X)
   * [zlib](https://zlib.net/)
   
-* Submodules:
+* Submodules (vendored, statically linked — no system install needed):
   * [jssy](https://github.com/tihmstar/jssy)
+  * [libgeneral](https://github.com/tihmstar/libgeneral)
+  * [libfragmentzip](https://github.com/tihmstar/libfragmentzip)
   
 * Bundled libs, (not required to be installed manually):
   * [tss](https://github.com/libimobiledevice)
+
+Fetch the vendored submodules first:
+
+```bash
+git submodule update --init --recursive
+```
 
 To compile, run:
 
@@ -98,6 +102,21 @@ To compile, run:
 ./autogen.sh
 make
 sudo make install
+```
+
+Alternatively with CMake (produces the static `libtsschecker.0.a` and a statically
+linked `tsschecker` executable; `libgeneral`/`libfragmentzip` are always static):
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+For a fully static binary (`-static`, needs a static toolchain such as musl):
+
+```bash
+cmake -S . -B build -DTSSCHECKER_FULLY_STATIC=ON
+cmake --build build
 ```
 
 # Help  

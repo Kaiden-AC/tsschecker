@@ -1,3 +1,9 @@
 [submodule "external/jssy"]
 	path = external/jssy
 	url = https://github.com/tihmstar/jssy.git
+[submodule "external/libgeneral"]
+	path = external/libgeneral
+	url = https://github.com/tihmstar/libgeneral
+[submodule "external/libfragmentzip"]
+	path = external/libfragmentzip
+	url = https://github.com/tihmstar/libfragmentzip

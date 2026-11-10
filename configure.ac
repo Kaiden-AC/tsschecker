@@ -34,6 +34,8 @@ AM_CONDITIONAL([OSX], [test "$build_mac" = "yes"])
 # Checks for programs.
 AC_PROG_CC
 CFLAGS+=" -std=gnu11"
+AC_PROG_CXX
+CXXFLAGS+=" -std=c++17"
 AC_PROG_INSTALL
 AC_PROG_LIBTOOL
 AC_CONFIG_MACRO_DIRS([m4])
@@ -72,7 +74,13 @@ AC_ARG_WITH(
 PKG_CHECK_MODULES(libplist, libplist-2.0 >= 2.3.0)
 PKG_CHECK_MODULES(libtatsu, libtatsu-1.0 >= 1.0.4)
 PKG_CHECK_MODULES(libcurl, libcurl >= 1.0)
-PKG_CHECK_MODULES(libfragmentzip, libfragmentzip >= 48)
+# libgeneral + libfragmentzip are vendored as git submodules under external/
+# (https://github.com/tihmstar/libgeneral,
+#  https://github.com/tihmstar/libfragmentzip)
+# and built statically as libgeneral.a / libfragmentzip.a, so no system
+# pkg-config install is required for them. zlib is still needed by
+# libfragmentzip.
+PKG_CHECK_MODULES(zlib, zlib >= 1.0)
 
 AS_IF([test "x$with_wolfssl" = xyes], [
         PKG_CHECK_MODULES(wolfssl, wolfssl >= 1.0)
@@ -123,5 +131,9 @@ esac
 
 AM_CONDITIONAL(NOMAIN, test x$nomain == xtrue)
 
-AC_CONFIG_FILES([Makefile tsschecker/Makefile])
+# libgeneral/macros.h is generated from macros.h.in (vendored submodule).
+# Upstream defaults: cleanup macro enabled (0 = disabled flag value).
+AC_SUBST([LIBGENERAL_CLEANUP_IS_DISABLED], [0])
+
+AC_CONFIG_FILES([Makefile tsschecker/Makefile external/libgeneral/include/libgeneral/macros.h])
 AC_OUTPUT
